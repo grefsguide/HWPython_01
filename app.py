@@ -85,9 +85,9 @@ if uploaded_file:
 
             if lower_bound <= current_temp <= upper_bound:
                 st.write("Температура в норме для текущего сезона.")
-                st.write(f"Верхняя граница: {round(upper_bound, 2}")
+                st.write(f"Верхняя граница: {round(upper_bound, 2)}")
                 st.write(f"Нижняя граница: {round(lower_bound, 2)}")
             else:
                 st.write("Температура аномальна для текущего сезона.")
-                st.write(f"Верхняя граница: {round(upper_bound, 2}")
+                st.write(f"Верхняя граница: {round(upper_bound, 2)}")
                 st.write(f"Нижняя граница: {round(lower_bound, 2)}")
