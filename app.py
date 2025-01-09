@@ -30,7 +30,7 @@ def get_current_temperature(api_key, city):
     if response.status_code == 200:
         return response.json()['main']['temp']
     else:
-        st.error(f"Error: {response.json().get('message', 'Unknown error')}")
+        st.error(f"Error: {response.json().get('message', 'Invalid API key. Please see https://openweathermap.org/faq#error401 for more info.')}")
         return None
 
 # Этап 3: Построение приложения
