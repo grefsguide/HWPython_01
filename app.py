@@ -3,37 +3,71 @@ import numpy as np
 import streamlit as st
 import requests
 import matplotlib.pyplot as plt
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
+import aiohttp
+import time
 
-# Этап 1: Загрузка и обработка данных
+# ========== Этап 1: Загрузка и обработка данных ==========
 def load_data(file):
     """Загрузка исторических данных."""
     return pd.read_csv(file)
 
-def calculate_statistics(data):
-    """Вычисление скользящего среднего, стандартного отклонения и аномалий."""
-    data['rolling_mean'] = data['temperature'].rolling(window=30).mean()
-    data['rolling_std'] = data['temperature'].rolling(window=30).std()
-    data['upper_bound'] = data['rolling_mean'] + 2 * data['rolling_std']
-    data['lower_bound'] = data['rolling_mean'] - 2 * data['rolling_std']
-    data['anomaly'] = (data['temperature'] > data['upper_bound']) | (data['temperature'] < data['lower_bound'])
-    return data
+def process_city_data(city_data):
+    """Обработка данных для одного города."""
+    city_data['rolling_mean'] = city_data['temperature'].rolling(window=30).mean()
+    city_data['rolling_std'] = city_data['temperature'].rolling(window=30).std()
+    city_data['upper_bound'] = city_data['rolling_mean'] + 2 * city_data['rolling_std']
+    city_data['lower_bound'] = city_data['rolling_mean'] - 2 * city_data['rolling_std']
+    city_data['anomaly'] = (city_data['temperature'] > city_data['upper_bound']) | (city_data['temperature'] < city_data['lower_bound'])
+    return city_data
+
+def analyze_with_parallelism(data):
+    """Параллельный анализ данных."""
+    grouped_data = [group for _, group in data.groupby('city')]
+    with ThreadPoolExecutor() as executor:
+        processed_data = list(executor.map(process_city_data, grouped_data))
+    return pd.concat(processed_data)
+
+def analyze_without_parallelism(data):
+    """Последовательный анализ данных."""
+    processed_data = []
+    for _, group in data.groupby('city'):
+        processed_data.append(process_city_data(group))
+    return pd.concat(processed_data)
 
 def seasonal_statistics(data):
     """Средняя температура и стандартное отклонение по сезонам."""
     return data.groupby(['city', 'season'])['temperature'].agg(['mean', 'std']).reset_index()
 
-# Этап 2: Получение текущей температуры
-def get_current_temperature(api_key, city):
-    """Получение текущей температуры через OpenWeatherMap API."""
+# ========== Этап 2: Получение текущей температуры ==========
+async def fetch_temperature_async(session, api_key, city):
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
+    async with session.get(url) as response:
+        if response.status == 200:
+            return await response.json()
+        else:
+            return {'error': f"Error fetching data for {city}: {response.status}"}
+
+async def monitor_with_async(api_key, cities):
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_temperature_async(session, api_key, city) for city in cities]
+        results = await asyncio.gather(*tasks)
+    return results
+
+def fetch_temperature_sync(api_key, city):
     url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
     response = requests.get(url)
     if response.status_code == 200:
-        return response.json()['main']['temp']
+        return response.json()
     else:
-        st.error(f"Error: {response.json().get('message', 'Invalid API key. Please see https://openweathermap.org/faq#error401 for more info.')}")
-        return None
+        return {'error': f"Error fetching data for {city}: {response.status_code}"}
 
-# Этап 3: Построение приложения
+def monitor_without_async(api_key, cities):
+    results = [fetch_temperature_sync(api_key, city) for city in cities]
+    return results
+
+# ========== Этап 3: Построение приложения ==========
 st.title("Анализ температурных данных")
 
 # Загрузка данных
@@ -46,48 +80,56 @@ if uploaded_file:
     city = st.selectbox("Выберите город:", data['city'].unique())
     city_data = data[data['city'] == city]
 
-    # Обработка данных
-    processed_data = calculate_statistics(city_data)
-    seasonal_stats = seasonal_statistics(city_data)
+    # Анализ данных
+    st.subheader("Анализ данных")
+    start_time = time.time()
+    processed_data_seq = analyze_without_parallelism(data)
+    time_seq = time.time() - start_time
 
-    # Отображение описательной статистики
+    start_time = time.time()
+    processed_data_par = analyze_with_parallelism(data)
+    time_par = time.time() - start_time
+
+    st.write(f"Время последовательного анализа: {time_seq:.2f} сек")
+    st.write(f"Время параллельного анализа: {time_par:.2f} сек")
+
+    # Описательная статистика
+    seasonal_stats = seasonal_statistics(city_data)
     st.subheader("Описательная статистика")
     st.write(seasonal_stats)
 
     # Построение графика временного ряда
     st.subheader("Временной ряд температур")
     fig, ax = plt.subplots()
-    ax.plot(processed_data['timestamp'], processed_data['temperature'], label='Температура')
-    ax.plot(processed_data['timestamp'], processed_data['rolling_mean'], label='Скользящее среднее', color='orange')
-    ax.fill_between(processed_data['timestamp'], processed_data['lower_bound'], processed_data['upper_bound'], color='gray', alpha=0.2, label='Диапазон ±2σ')
-    ax.scatter(processed_data['timestamp'][processed_data['anomaly']],
-               processed_data['temperature'][processed_data['anomaly']],
+    ax.plot(processed_data_par['timestamp'], processed_data_par['temperature'], label='Температура')
+    ax.plot(processed_data_par['timestamp'], processed_data_par['rolling_mean'], label='Скользящее среднее', color='orange')
+    ax.fill_between(processed_data_par['timestamp'], processed_data_par['lower_bound'], processed_data_par['upper_bound'], color='gray', alpha=0.2, label='Диапазон ±2σ')
+    ax.scatter(processed_data_par['timestamp'][processed_data_par['anomaly']], 
+               processed_data_par['temperature'][processed_data_par['anomaly']], 
                color='red', label='Аномалии')
     ax.legend()
     plt.xticks(rotation=45)
     st.pyplot(fig)
 
-    # Получение текущей температуры
+    # Мониторинг текущей температуры
     st.subheader("Мониторинг текущей температуры")
     api_key = st.text_input("Введите ваш OpenWeatherMap API Key:")
+    cities = data['city'].unique()
+
     if api_key:
-        current_temp = get_current_temperature(api_key, city)
-        if current_temp is not None:
-            st.write(f"Текущая температура в городе {city}: {current_temp}°C")
+        st.write("Синхронный мониторинг температуры...")
+        start_time = time.time()
+        results_sync = monitor_without_async(api_key, cities)
+        time_sync = time.time() - start_time
+        st.write(f"Время выполнения: {time_sync:.2f} сек")
 
-            # Определение нормальности температуры
-            current_season = city_data['season'].iloc[-1]
-            season_mean = seasonal_stats[(seasonal_stats['city'] == city) & (seasonal_stats['season'] == current_season)]['mean'].values[0]
-            season_std = seasonal_stats[(seasonal_stats['city'] == city) & (seasonal_stats['season'] == current_season)]['std'].values[0]
+        st.write("Асинхронный мониторинг температуры...")
+        start_time = time.time()
+        results_async = asyncio.run(monitor_with_async(api_key, cities))
+        time_async = time.time() - start_time
+        st.write(f"Время выполнения: {time_async:.2f} сек")
 
-            lower_bound = season_mean - 2 * season_std
-            upper_bound = season_mean + 2 * season_std
-
-            if lower_bound <= current_temp <= upper_bound:
-                st.write("Температура в норме для текущего сезона.")
-                st.write(f"Верхняя граница: {round(upper_bound, 2)}")
-                st.write(f"Нижняя граница: {round(lower_bound, 2)}")
-            else:
-                st.write("Температура аномальна для текущего сезона.")
-                st.write(f"Верхняя граница: {round(upper_bound, 2)}")
-                st.write(f"Нижняя граница: {round(lower_bound, 2)}")
+        st.write("Результаты синхронного мониторинга:")
+        st.write(results_sync)
+        st.write("Результаты асинхронного мониторинга:")
+        st.write(results_async)
